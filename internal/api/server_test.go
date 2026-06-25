@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/gokube/gokube/internal/logs"
 	"github.com/gokube/gokube/internal/models"
 	"github.com/gokube/gokube/internal/queue"
 	"github.com/gokube/gokube/internal/store"
@@ -19,7 +20,7 @@ func TestCreateAndGetJob(t *testing.T) {
 
 	st := newTestStore(t)
 	q := queue.New(8)
-	srv := NewServer(st, q, nil, slog.Default())
+	srv := NewServer(st, q, nil, logs.NewStore(100), slog.Default())
 
 	body := `{
 		"name": "hello",
@@ -61,7 +62,7 @@ func TestCreateJobValidationError(t *testing.T) {
 
 	st := newTestStore(t)
 	q := queue.New(8)
-	srv := NewServer(st, q, nil, slog.Default())
+	srv := NewServer(st, q, nil, logs.NewStore(100), slog.Default())
 
 	body := `{"name":"","image":"x","command":["echo"],"cpu":"1","memory":"1Gi"}`
 	req := httptest.NewRequest(http.MethodPost, "/jobs", bytes.NewBufferString(body))

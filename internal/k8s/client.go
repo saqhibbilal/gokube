@@ -3,8 +3,11 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"io"
 
 	batchv1 "k8s.io/api/batch/v1"
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -91,10 +94,27 @@ func (c *Client) DeleteJob(ctx context.Context, name string) error {
 	err := c.clientset.BatchV1().Jobs(c.namespace).Delete(ctx, name, metav1.DeleteOptions{
 		PropagationPolicy: &propagation,
 	})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
 	if err != nil {
 		return fmt.Errorf("delete job %q: %w", name, err)
 	}
 	return nil
+}
+
+// Clientset exposes the underlying Kubernetes clientset for informers.
+func (c *Client) Clientset() kubernetes.Interface {
+	return c.clientset
+}
+
+// StreamPodLogs opens a log stream for a pod in the controller namespace.
+func (c *Client) StreamPodLogs(ctx context.Context, podName string, opts *corev1.PodLogOptions) (io.ReadCloser, error) {
+	if opts == nil {
+		opts = &corev1.PodLogOptions{}
+	}
+	req := c.clientset.CoreV1().Pods(c.namespace).GetLogs(podName, opts)
+	return req.Stream(ctx)
 }
 
 // GetJob fetches a Kubernetes Job by name.

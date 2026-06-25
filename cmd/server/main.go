@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/gokube/gokube/internal/api"
+	"github.com/gokube/gokube/internal/controller"
 	"github.com/gokube/gokube/internal/k8s"
+	"github.com/gokube/gokube/internal/logs"
 	"github.com/gokube/gokube/internal/queue"
 	"github.com/gokube/gokube/internal/scheduler"
 	"github.com/gokube/gokube/internal/store"
@@ -25,6 +27,8 @@ func main() {
 	dbPath := flag.String("db", envString("GOKUBE_DB_PATH", "gokube.db"), "SQLite database path")
 	queueSize := flag.Int("queue-size", envInt("GOKUBE_QUEUE_SIZE", 128), "job queue buffer size")
 	workers := flag.Int("workers", envInt("GOKUBE_WORKERS", 4), "scheduler worker count")
+	ctrlWorkers := flag.Int("controller-workers", envInt("GOKUBE_CONTROLLER_WORKERS", 4), "controller event worker count")
+	logLines := flag.Int("log-lines", envInt("GOKUBE_LOG_LINES", 500), "max stored log lines per job")
 	namespace := flag.String("namespace", envString("GOKUBE_NAMESPACE", "gokube"), "kubernetes namespace")
 	kubeconfig := flag.String("kubeconfig", envString("KUBECONFIG", ""), "path to kubeconfig file")
 	interval := flag.Duration("scheduler-interval", envDuration("GOKUBE_SCHEDULER_INTERVAL", 5*time.Second), "cluster resource refresh interval")
@@ -47,16 +51,31 @@ func main() {
 	}
 
 	jobQueue := queue.New(*queueSize)
+	logStore := logs.NewStore(*logLines)
+	logStreamer := logs.NewStreamer(k8sClient, logStore, logger)
+
+	ctx := context.Background()
+
 	sched := scheduler.New(st, jobQueue, k8sClient, scheduler.Config{
 		Workers:  *workers,
 		Interval: *interval,
 		Strategy: parseStrategy(*strategyName),
 	}, logger)
-
-	ctx := context.Background()
 	sched.Start(ctx)
 
-	srv := api.NewServer(st, jobQueue, k8sClient, logger)
+	ctrl := controller.New(
+		st,
+		jobQueue,
+		k8sClient.Clientset(),
+		k8sClient,
+		*namespace,
+		logStreamer,
+		controller.Config{Workers: *ctrlWorkers},
+		logger,
+	)
+	ctrl.Start(ctx)
+
+	srv := api.NewServer(st, jobQueue, k8sClient, logStore, logger)
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", *port),
 		Handler:      srv.Handler(),
@@ -73,6 +92,7 @@ func main() {
 			"namespace", *namespace,
 			"queue_size", *queueSize,
 			"workers", *workers,
+			"controller_workers", *ctrlWorkers,
 			"strategy", *strategyName,
 		)
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -101,6 +121,7 @@ func main() {
 	logger.Info("http server stopped")
 
 	sched.Stop()
+	ctrl.Stop()
 	logger.Info("gokube stopped")
 }
 

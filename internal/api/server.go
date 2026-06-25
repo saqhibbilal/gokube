@@ -10,6 +10,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 
+	"github.com/gokube/gokube/internal/logs"
 	"github.com/gokube/gokube/internal/models"
 	"github.com/gokube/gokube/internal/queue"
 	"github.com/gokube/gokube/internal/store"
@@ -24,11 +25,12 @@ type Server struct {
 	store  *store.Store
 	queue  *queue.Queue
 	k8s    JobDeleter
+	logs   *logs.Store
 	logger *slog.Logger
 	router chi.Router
 }
 
-func NewServer(st *store.Store, q *queue.Queue, k8s JobDeleter, logger *slog.Logger) *Server {
+func NewServer(st *store.Store, q *queue.Queue, k8s JobDeleter, logStore *logs.Store, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -37,6 +39,7 @@ func NewServer(st *store.Store, q *queue.Queue, k8s JobDeleter, logger *slog.Log
 		store:  st,
 		queue:  q,
 		k8s:    k8s,
+		logs:   logStore,
 		logger: logger,
 	}
 	s.router = s.routes()
@@ -60,6 +63,7 @@ func (s *Server) routes() chi.Router {
 		r.Post("/", s.handleCreateJob)
 		r.Get("/", s.handleListJobs)
 		r.Get("/{id}", s.handleGetJob)
+		r.Get("/{id}/logs", s.handleGetJobLogs)
 		r.Delete("/{id}", s.handleDeleteJob)
 	})
 
@@ -138,6 +142,25 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, job)
 }
 
+func (s *Server) handleGetJobLogs(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	if _, err := s.store.GetJob(r.Context(), id); errors.Is(err, store.ErrNotFound) {
+		writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
+		return
+	} else if err != nil {
+		s.logger.Error("get job for logs failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to get job logs")
+		return
+	}
+
+	if s.logs == nil {
+		writeJSON(w, http.StatusOK, models.JobLogsResponse{JobID: id, Lines: []string{}})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, s.logs.Get(id))
+}
+
 func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	job, err := s.store.GetJob(r.Context(), id)
@@ -163,6 +186,10 @@ func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 		s.logger.Error("delete job failed", "error", err, "id", id)
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to delete job")
 		return
+	}
+
+	if s.logs != nil {
+		s.logs.Delete(id)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
