@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gokube/gokube/internal/models"
+	"github.com/gokube/gokube/internal/queue"
 	"github.com/gokube/gokube/internal/store"
 )
 
@@ -17,7 +18,8 @@ func TestCreateAndGetJob(t *testing.T) {
 	t.Parallel()
 
 	st := newTestStore(t)
-	srv := NewServer(st, slog.Default())
+	q := queue.New(8)
+	srv := NewServer(st, q, nil, slog.Default())
 
 	body := `{
 		"name": "hello",
@@ -41,8 +43,8 @@ func TestCreateAndGetJob(t *testing.T) {
 	if err := json.NewDecoder(createRec.Body).Decode(&created); err != nil {
 		t.Fatalf("decode created job: %v", err)
 	}
-	if created.Status.State != models.StatePending {
-		t.Fatalf("expected Pending, got %s", created.Status.State)
+	if created.Status.State != models.StateQueued {
+		t.Fatalf("expected Queued, got %s", created.Status.State)
 	}
 
 	getReq := httptest.NewRequest(http.MethodGet, "/jobs/"+created.ID, nil)
@@ -58,7 +60,8 @@ func TestCreateJobValidationError(t *testing.T) {
 	t.Parallel()
 
 	st := newTestStore(t)
-	srv := NewServer(st, slog.Default())
+	q := queue.New(8)
+	srv := NewServer(st, q, nil, slog.Default())
 
 	body := `{"name":"","image":"x","command":["echo"],"cpu":"1","memory":"1Gi"}`
 	req := httptest.NewRequest(http.MethodPost, "/jobs", bytes.NewBufferString(body))

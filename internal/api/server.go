@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -10,22 +11,32 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/gokube/gokube/internal/models"
+	"github.com/gokube/gokube/internal/queue"
 	"github.com/gokube/gokube/internal/store"
 )
 
+// JobDeleter removes a Kubernetes Job by name. Optional for tests.
+type JobDeleter interface {
+	DeleteJob(ctx context.Context, name string) error
+}
+
 type Server struct {
 	store  *store.Store
+	queue  *queue.Queue
+	k8s    JobDeleter
 	logger *slog.Logger
 	router chi.Router
 }
 
-func NewServer(st *store.Store, logger *slog.Logger) *Server {
+func NewServer(st *store.Store, q *queue.Queue, k8s JobDeleter, logger *slog.Logger) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	s := &Server{
 		store:  st,
+		queue:  q,
+		k8s:    k8s,
 		logger: logger,
 	}
 	s.router = s.routes()
@@ -78,6 +89,19 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if err := s.store.UpdateJobState(r.Context(), job.ID, models.StateQueued); err != nil {
+		s.logger.Error("enqueue transition failed", "error", err, "job_id", job.ID)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to queue job")
+		return
+	}
+	job.Status.State = models.StateQueued
+
+	if err := s.queue.Enqueue(r.Context(), job); err != nil {
+		s.logger.Error("enqueue failed", "error", err, "job_id", job.ID)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to enqueue job")
+		return
+	}
+
 	writeJSON(w, http.StatusCreated, job)
 }
 
@@ -116,10 +140,26 @@ func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteJob(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
-	if err := s.store.DeleteJob(r.Context(), id); errors.Is(err, store.ErrNotFound) {
+	job, err := s.store.GetJob(r.Context(), id)
+	if errors.Is(err, store.ErrNotFound) {
 		writeError(w, http.StatusNotFound, "NOT_FOUND", "job not found")
 		return
-	} else if err != nil {
+	}
+	if err != nil {
+		s.logger.Error("get job for delete failed", "error", err, "id", id)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to delete job")
+		return
+	}
+
+	if job.Status.K8sJobName != "" && s.k8s != nil {
+		if err := s.k8s.DeleteJob(r.Context(), job.Status.K8sJobName); err != nil {
+			s.logger.Error("kubernetes job delete failed", "error", err, "k8s_job", job.Status.K8sJobName)
+			writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to delete kubernetes job")
+			return
+		}
+	}
+
+	if err := s.store.DeleteJob(r.Context(), id); err != nil {
 		s.logger.Error("delete job failed", "error", err, "id", id)
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to delete job")
 		return

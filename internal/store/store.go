@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 
+	"github.com/gokube/gokube/internal/k8s"
 	"github.com/gokube/gokube/internal/models"
 )
 
@@ -105,6 +106,78 @@ func (s *Store) CreateJob(ctx context.Context, spec models.JobSpec) (*models.Job
 	}
 
 	return job, nil
+}
+
+func (s *Store) UpdateJobState(ctx context.Context, id string, state models.JobState) error {
+	now := time.Now().UTC()
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE jobs SET state = ?, updated_at = ? WHERE id = ?`,
+		string(state), formatTime(now), id)
+	if err != nil {
+		return fmt.Errorf("update job state: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) MarkJobScheduled(ctx context.Context, id, k8sJobName string) error {
+	now := time.Now().UTC()
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE jobs SET state = ?, k8s_job_name = ?, updated_at = ? WHERE id = ?`,
+		string(models.StateScheduled), k8sJobName, formatTime(now), id)
+	if err != nil {
+		return fmt.Errorf("mark job scheduled: %w", err)
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("rows affected: %w", err)
+	}
+	if rows == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// SumActiveResourceUsage totals CPU/memory requests for jobs consuming cluster capacity.
+func (s *Store) SumActiveResourceUsage(ctx context.Context) (k8s.Capacity, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT cpu, memory FROM jobs
+		WHERE state IN (?, ?)`,
+		string(models.StateScheduled), string(models.StateRunning))
+	if err != nil {
+		return k8s.Capacity{}, fmt.Errorf("sum active resources: %w", err)
+	}
+	defer rows.Close()
+
+	var total k8s.Capacity
+	for rows.Next() {
+		var cpu, memory string
+		if err := rows.Scan(&cpu, &memory); err != nil {
+			return k8s.Capacity{}, fmt.Errorf("scan resource row: %w", err)
+		}
+		cpuVal, err := k8s.ParseCPU(cpu)
+		if err != nil {
+			return k8s.Capacity{}, err
+		}
+		memVal, err := k8s.ParseMemory(memory)
+		if err != nil {
+			return k8s.Capacity{}, err
+		}
+		total.CPUMillicores += cpuVal
+		total.MemoryBytes += memVal
+	}
+	if err := rows.Err(); err != nil {
+		return k8s.Capacity{}, err
+	}
+	return total, nil
 }
 
 func (s *Store) GetJob(ctx context.Context, id string) (*models.Job, error) {
