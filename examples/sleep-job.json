@@ -1,0 +1,9 @@
+{
+  "name": "sleep-30",
+  "image": "python:3.11",
+  "command": ["sleep", "30"],
+  "cpu": "100m",
+  "memory": "128Mi",
+  "priority": 0,
+  "max_retries": 0
+}

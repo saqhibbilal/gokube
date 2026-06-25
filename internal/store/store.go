@@ -180,6 +180,29 @@ func (s *Store) SumActiveResourceUsage(ctx context.Context) (k8s.Capacity, error
 	return total, nil
 }
 
+// CountJobsByState returns job counts grouped by state.
+func (s *Store) CountJobsByState(ctx context.Context) (map[models.JobState]int, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT state, COUNT(*) FROM jobs GROUP BY state`)
+	if err != nil {
+		return nil, fmt.Errorf("count jobs by state: %w", err)
+	}
+	defer rows.Close()
+
+	counts := make(map[models.JobState]int)
+	for rows.Next() {
+		var state string
+		var count int
+		if err := rows.Scan(&state, &count); err != nil {
+			return nil, fmt.Errorf("scan state count: %w", err)
+		}
+		counts[models.JobState(state)] = count
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
 func (s *Store) GetJob(ctx context.Context, id string) (*models.Job, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, name, image, command, cpu, memory, priority, max_retries,

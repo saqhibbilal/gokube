@@ -15,6 +15,7 @@ import (
 
 	"github.com/gokube/gokube/internal/k8s"
 	"github.com/gokube/gokube/internal/logs"
+	"github.com/gokube/gokube/internal/metrics"
 	"github.com/gokube/gokube/internal/models"
 	"github.com/gokube/gokube/internal/queue"
 	"github.com/gokube/gokube/internal/store"
@@ -32,6 +33,7 @@ type JobDeleter interface {
 
 type Config struct {
 	Workers int
+	Metrics *metrics.Collector
 }
 
 // Controller watches Kubernetes Jobs and Pods and syncs status into SQLite.
@@ -44,6 +46,7 @@ type Controller struct {
 	streamer *logs.Streamer
 	events   chan Event
 	workers  int
+	metrics  *metrics.Collector
 	logger   *slog.Logger
 
 	wg     sync.WaitGroup
@@ -79,6 +82,7 @@ func New(
 		streamer:  streamer,
 		events:    make(chan Event, 256),
 		workers:   cfg.Workers,
+		metrics:   cfg.Metrics,
 		logger:    logger,
 		stopCh:    make(chan struct{}),
 	}
@@ -212,6 +216,9 @@ func (c *Controller) handlePod(ctx context.Context, pod *corev1.Pod) {
 		c.streamer.EnsureFollowing(ctx, jobID, pod.Name)
 	case models.StateSucceeded:
 		c.streamer.Stop(jobID)
+		if c.metrics != nil {
+			c.metrics.RecordSucceeded(time.Duration(patch.DurationMs) * time.Millisecond)
+		}
 	case models.StateFailed:
 		c.streamer.Stop(jobID)
 		updated, err := c.store.GetJob(ctx, jobID)
@@ -236,6 +243,9 @@ func (c *Controller) handleJob(ctx context.Context, k8sJob *batchv1.Job) {
 	if k8sJob.Status.Succeeded > 0 {
 		_ = c.store.ApplyJobStatus(ctx, jobID, models.JobStatusPatch{State: models.StateSucceeded})
 		c.streamer.Stop(jobID)
+		if c.metrics != nil {
+			c.metrics.RecordSucceeded(0)
+		}
 		return
 	}
 	if k8sJob.Status.Failed > 0 {
@@ -255,6 +265,9 @@ func (c *Controller) handleJob(ctx context.Context, k8sJob *batchv1.Job) {
 
 func (c *Controller) handleFailure(ctx context.Context, job *models.Job) {
 	if !ShouldRetry(job) {
+		if c.metrics != nil {
+			c.metrics.RecordFailed()
+		}
 		c.logger.Info("job failed permanently",
 			"job_id", job.ID,
 			"restart_count", job.Status.RestartCount,
@@ -287,6 +300,9 @@ func (c *Controller) handleFailure(ctx context.Context, job *models.Job) {
 	if err := c.queue.Enqueue(ctx, retried); err != nil {
 		c.logger.Error("re-enqueue failed", "job_id", job.ID, "error", err)
 		return
+	}
+	if c.metrics != nil {
+		c.metrics.RecordEnqueued(retried.ID)
 	}
 
 	c.logger.Info("job scheduled for retry",

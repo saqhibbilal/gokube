@@ -17,6 +17,7 @@ import (
 	"github.com/gokube/gokube/internal/controller"
 	"github.com/gokube/gokube/internal/k8s"
 	"github.com/gokube/gokube/internal/logs"
+	"github.com/gokube/gokube/internal/metrics"
 	"github.com/gokube/gokube/internal/queue"
 	"github.com/gokube/gokube/internal/scheduler"
 	"github.com/gokube/gokube/internal/store"
@@ -53,6 +54,7 @@ func main() {
 	jobQueue := queue.New(*queueSize)
 	logStore := logs.NewStore(*logLines)
 	logStreamer := logs.NewStreamer(k8sClient, logStore, logger)
+	metricsCollector := metrics.New()
 
 	ctx := context.Background()
 
@@ -60,6 +62,7 @@ func main() {
 		Workers:  *workers,
 		Interval: *interval,
 		Strategy: parseStrategy(*strategyName),
+		Metrics:  metricsCollector,
 	}, logger)
 	sched.Start(ctx)
 
@@ -70,12 +73,12 @@ func main() {
 		k8sClient,
 		*namespace,
 		logStreamer,
-		controller.Config{Workers: *ctrlWorkers},
+		controller.Config{Workers: *ctrlWorkers, Metrics: metricsCollector},
 		logger,
 	)
 	ctrl.Start(ctx)
 
-	srv := api.NewServer(st, jobQueue, k8sClient, logStore, logger)
+	srv := api.NewServer(st, jobQueue, k8sClient, logStore, metricsCollector, sched.QueueDepth, logger)
 	httpServer := &http.Server{
 		Addr:         fmt.Sprintf(":%d", *port),
 		Handler:      srv.Handler(),

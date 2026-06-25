@@ -1,0 +1,9 @@
+{
+  "name": "resource-hog",
+  "image": "python:3.11",
+  "command": ["python", "-c", "import time; print('hog'); time.sleep(60)"],
+  "cpu": "4000m",
+  "memory": "4Gi",
+  "priority": 10,
+  "max_retries": 0
+}

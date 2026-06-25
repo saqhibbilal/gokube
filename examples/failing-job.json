@@ -1,0 +1,9 @@
+{
+  "name": "fail-demo",
+  "image": "python:3.11",
+  "command": ["python", "-c", "import sys; print('boom'); sys.exit(1)"],
+  "cpu": "100m",
+  "memory": "128Mi",
+  "priority": 1,
+  "max_retries": 2
+}

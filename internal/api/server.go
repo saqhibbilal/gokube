@@ -11,6 +11,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"github.com/gokube/gokube/internal/logs"
+	"github.com/gokube/gokube/internal/metrics"
 	"github.com/gokube/gokube/internal/models"
 	"github.com/gokube/gokube/internal/queue"
 	"github.com/gokube/gokube/internal/store"
@@ -22,25 +23,37 @@ type JobDeleter interface {
 }
 
 type Server struct {
-	store  *store.Store
-	queue  *queue.Queue
-	k8s    JobDeleter
-	logs   *logs.Store
-	logger *slog.Logger
-	router chi.Router
+	store      *store.Store
+	queue      *queue.Queue
+	k8s        JobDeleter
+	logs       *logs.Store
+	metrics    *metrics.Collector
+	queueDepth func() int
+	logger     *slog.Logger
+	router     chi.Router
 }
 
-func NewServer(st *store.Store, q *queue.Queue, k8s JobDeleter, logStore *logs.Store, logger *slog.Logger) *Server {
+func NewServer(
+	st *store.Store,
+	q *queue.Queue,
+	k8s JobDeleter,
+	logStore *logs.Store,
+	m *metrics.Collector,
+	queueDepth func() int,
+	logger *slog.Logger,
+) *Server {
 	if logger == nil {
 		logger = slog.Default()
 	}
 
 	s := &Server{
-		store:  st,
-		queue:  q,
-		k8s:    k8s,
-		logs:   logStore,
-		logger: logger,
+		store:      st,
+		queue:      q,
+		k8s:        k8s,
+		logs:       logStore,
+		metrics:    m,
+		queueDepth: queueDepth,
+		logger:     logger,
 	}
 	s.router = s.routes()
 	return s
@@ -58,6 +71,7 @@ func (s *Server) routes() chi.Router {
 	r.Use(middleware.Logger)
 
 	r.Get("/health", s.handleHealth)
+	r.Get("/metrics", s.handleMetrics)
 
 	r.Route("/jobs", func(r chi.Router) {
 		r.Post("/", s.handleCreateJob)
@@ -105,8 +119,47 @@ func (s *Server) handleCreateJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to enqueue job")
 		return
 	}
+	if s.metrics != nil {
+		s.metrics.RecordEnqueued(job.ID)
+	}
 
 	writeJSON(w, http.StatusCreated, job)
+}
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	counts, err := s.store.CountJobsByState(r.Context())
+	if err != nil {
+		s.logger.Error("count jobs for metrics failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "INTERNAL_ERROR", "failed to collect metrics")
+		return
+	}
+
+	depth := s.queue.Len()
+	if s.queueDepth != nil {
+		depth = s.queueDepth()
+	}
+
+	var snap metrics.Snapshot
+	if s.metrics != nil {
+		snap = s.metrics.Snapshot(
+			depth,
+			counts[models.StateQueued],
+			counts[models.StateRunning],
+			counts[models.StateSucceeded],
+			counts[models.StateFailed],
+		)
+	} else {
+		snap = metrics.Snapshot{
+			QueueDepth:    depth,
+			JobsQueued:    counts[models.StateQueued],
+			JobsRunning:   counts[models.StateRunning],
+			JobsSucceeded: counts[models.StateSucceeded],
+			JobsFailed:    counts[models.StateFailed],
+		}
+	}
+
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	_, _ = w.Write([]byte(metrics.RenderPrometheus(snap)))
 }
 
 func (s *Server) handleListJobs(w http.ResponseWriter, r *http.Request) {

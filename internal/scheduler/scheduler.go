@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gokube/gokube/internal/k8s"
+	"github.com/gokube/gokube/internal/metrics"
 	"github.com/gokube/gokube/internal/models"
 	"github.com/gokube/gokube/internal/queue"
 	"github.com/gokube/gokube/internal/store"
@@ -29,6 +30,7 @@ type Scheduler struct {
 	strategy Strategy
 	workers  int
 	interval time.Duration
+	metrics  *metrics.Collector
 	logger   *slog.Logger
 
 	pending *pendingBuffer
@@ -58,6 +60,7 @@ type Config struct {
 	Workers  int
 	Interval time.Duration
 	Strategy Strategy
+	Metrics  *metrics.Collector
 }
 
 func New(st *store.Store, q *queue.Queue, client K8sAPI, cfg Config, logger *slog.Logger) *Scheduler {
@@ -81,6 +84,7 @@ func New(st *store.Store, q *queue.Queue, client K8sAPI, cfg Config, logger *slo
 		strategy: cfg.Strategy,
 		workers:  cfg.Workers,
 		interval: cfg.Interval,
+		metrics:  cfg.Metrics,
 		logger:   logger,
 		pending:  newPendingBuffer(),
 	}
@@ -107,6 +111,10 @@ func (s *Scheduler) Start(parent context.Context) {
 		"strategy", s.strategy.Name(),
 		"namespace", s.k8s.Namespace(),
 	)
+}
+
+func (s *Scheduler) QueueDepth() int {
+	return s.queue.Len() + s.pending.Len()
 }
 
 // Stop closes the queue, cancels background loops, and waits for workers to finish.
@@ -225,6 +233,9 @@ func (s *Scheduler) worker(ctx context.Context, id int) {
 		}
 
 		s.refreshResources(ctx)
+		if s.metrics != nil {
+			s.metrics.RecordScheduled(job.ID)
+		}
 		s.logger.Info("job scheduled to kubernetes",
 			"worker", id,
 			"job_id", job.ID,

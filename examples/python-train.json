@@ -1,0 +1,13 @@
+{
+  "name": "mini-train",
+  "image": "python:3.11",
+  "command": [
+    "python",
+    "-c",
+    "import time\nprint('training start')\nloss = sum(i*i for i in range(500000))\nprint(f'loss={loss % 1000}')\ntime.sleep(2)\nprint('training done')"
+  ],
+  "cpu": "250m",
+  "memory": "256Mi",
+  "priority": 5,
+  "max_retries": 1
+}
